@@ -1,6 +1,7 @@
 import os
 import asyncio
 import uuid
+import tracemalloc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from google.adk.agents import LlmAgent, SequentialAgent
@@ -13,8 +14,11 @@ from datetime import datetime
 from mcp.client.stdio import StdioClient
 import logging
 
+# Enable tracemalloc for debugging
+tracemalloc.start()
+
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -131,23 +135,38 @@ async def shutdown_event():
     if mcp_client:
         await mcp_client.stop()
         logger.info("MCP client stopped")
+    # Snapshot tracemalloc for debugging
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+    logger.info("Tracemalloc top memory allocations:")
+    for stat in top_stats[:5]:
+        logger.info(stat)
 
 # HTTP Endpoint
 @app.post("/api/plan-itinerary", response_model=ItineraryResponse)
 async def plan_itinerary(request: TravelRequest):
+    logger.info(f"Received request for itinerary: {request.destination}")
     try:
-        # Initialize session service
+        # Initialize session service per request
         session_service = InMemorySessionService()
         user_id = f"user_{uuid.uuid4()}"
         session_id = f"session_{uuid.uuid4()}"
         
-        # Create session and verify
+        # Create session
         session = session_service.create_session(
             app_name=APP_NAME,
             user_id=user_id,
             session_id=session_id
         )
-        logger.info(f"Created session: user_id={user_id}, session_id={session_id}")
+        logger.info(f"Created session: user_id={user_id}, session_id={session_id}, session={session}")
+
+        # Verify session exists
+        try:
+            retrieved_session = session_service.get_session(user_id=user_id, session_id=session_id)
+            logger.info(f"Verified session: {retrieved_session}")
+        except ValueError as ve:
+            logger.error(f"Session verification failed: {str(ve)}")
+            raise HTTPException(status_code=500, detail="Failed to verify session")
 
         # Initialize agents
         orchestrator_agent = await initialize_agents()
@@ -166,7 +185,7 @@ async def plan_itinerary(request: TravelRequest):
             parts=[types.Part(text=query)]
         )
 
-        # Run agent with session validation
+        # Run agent with fallback
         result = None
         try:
             for event in runner.run(
@@ -176,12 +195,22 @@ async def plan_itinerary(request: TravelRequest):
             ):
                 if event.is_final_response():
                     result = event.content.parts[0].text
+                    logger.info(f"Agent result: {result}")
                     break
         except ValueError as ve:
             logger.error(f"Session error during runner.run: {str(ve)}")
-            raise HTTPException(status_code=500, detail="Session not found, please try again")
+            # Fallback to direct calls
+            logger.info("Falling back to direct tool calls due to session error")
+            weather_data = get_weather(request.destination)
+            activities = suggest_activities(request.destination, weather_data, request.interests, request.budget)
+            return ItineraryResponse(
+                destination=request.destination,
+                weather=weather_data,
+                activities=activities,
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
 
-        # Fallback direct calls for reliability
+        # Normal response with direct calls for reliability
         weather_data = get_weather(request.destination)
         activities = suggest_activities(request.destination, weather_data, request.interests, request.budget)
 
@@ -192,7 +221,13 @@ async def plan_itinerary(request: TravelRequest):
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
     except Exception as e:
+        # Log tracemalloc snapshot for debugging
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.statistics('lineno')
         logger.error(f"Error planning itinerary: {str(e)}")
+        logger.error("Tracemalloc snapshot:")
+        for stat in top_stats[:5]:
+            logger.error(stat)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
