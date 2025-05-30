@@ -1,5 +1,6 @@
 import os
 import asyncio
+import uuid
 import pandas as pd
 import yfinance as yf
 from sklearn.linear_model import LinearRegression
@@ -18,10 +19,11 @@ import json
 app = FastAPI()
 
 # Environment setup
-os.environ["GOOGLE_API_KEY"] = "your-google-api-key"  # Replace with your Google API key
-os.environ["OPENWEATHER_API_KEY"] = "your-openweather-api-key"  # Replace with your OpenWeatherMap API key
+os.environ["GOOGLE_API_KEY"] = "your-google-api-key"
+os.environ["OPENWEATHER_API_KEY"] = "your-openweather-api-key"
 os.environ["GCP_PROJECT"] = "your-gcp-project"
 os.environ["GCP_LOCATION"] = "us-central1"
+APP_NAME = os.getenv("APP_NAME", "stock_weather_app")
 
 # Weather Tool
 def get_weather(location: str) -> dict:
@@ -96,27 +98,24 @@ orchestrator_agent = SequentialAgent(
     instruction="First, fetch weather data for the specified location. Then, use the weather data to predict the stock price for the given ticker."
 )
 
-# Runner and Session
-APP_NAME = "stock_weather_app"
-USER_ID = "user_123"
-SESSION_ID = "session_456"
-session_service = InMemorySessionService()
-session = session_service.create_session(
-    app_name=APP_NAME,
-    user_id=USER_ID,
-    session_id=SESSION_ID
-)
-runner = Runner(
-    agent=orchestrator_agent,
-    app_name=APP_NAME,
-    session_service=session_service
-)
-
-# WebSocket Endpoint
+# WebSocket Endpoint with Dynamic Session
 @app.websocket("/ws/predict")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
+        user_id = f"user_{uuid.uuid4()}"  # Dynamic user ID
+        session_id = f"session_{uuid.uuid4()}"  # Dynamic session ID
+        session_service = InMemorySessionService()
+        session = session_service.create_session(
+            app_name=APP_NAME,
+            user_id=user_id,
+            session_id=session_id
+        )
+        runner = Runner(
+            agent=orchestrator_agent,
+            app_name=APP_NAME,
+            session_service=session_service
+        )
         while True:
             data = await websocket.receive_json()
             ticker = data.get("ticker", "ADM")
@@ -128,8 +127,8 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             result = None
             for event in runner.run(
-                user_id=USER_ID,
-                session_id=SESSION_ID,
+                user_id=user_id,
+                session_id=session_id,
                 new_message=content
             ):
                 if event.is_final_response():
@@ -148,7 +147,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({"status": "error", "error_message": str(e)})
         await websocket.close()
 
-# MCP Server (simplified for demo)
+# MCP Server
 async def run_mcp_client():
     api_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api.py")
     tools, exit_stack = await MCPToolset.from_server(
