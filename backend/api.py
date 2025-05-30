@@ -18,7 +18,7 @@ def get_weather(location: str) -> dict:
             "location": location,
             "temperature": data["main"]["temp"],
             "humidity": data["main"]["humidity"],
-            "weather_condition": data["weather"][0]["description"],
+            "condition": data["weather"][0]["description"],
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:

@@ -1,22 +1,18 @@
 import os
 import asyncio
 import uuid
-import pandas as pd
-import yfinance as yf
-from sklearn.linear_model import LinearRegression
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 import requests
-from datetime import datetime, timedelta
-import json
-from mcp.client.stdio import StdioClient
+from datetime import datetime
+from mcp.client.stdio import stdio_client as StdioClient
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -27,56 +23,57 @@ os.environ["GOOGLE_API_KEY"] = "your-google-api-key"
 os.environ["OPENWEATHER_API_KEY"] = "your-openweather-api-key"
 os.environ["GCP_PROJECT"] = "your-gcp-project"
 os.environ["GCP_LOCATION"] = "us-central1"
-APP_NAME = os.getenv("APP_NAME", "stock_weather_app")
+APP_NAME = os.getenv("APP_NAME", "travel_itinerary_app")
+
+# Pydantic models
+class TravelRequest(BaseModel):
+    destination: str
+    start_date: str
+    end_date: str
+    budget: float
+    interests: list[str]
+
+class ItineraryResponse(BaseModel):
+    destination: str
+    weather: dict
+    activities: list[dict]
+    timestamp: str
 
 # Weather Tool (Direct Fallback)
-def get_weather(location: str) -> dict:
+def get_weather(destination: str) -> dict:
     api_key = os.getenv("OPENWEATHER_API_KEY")
     if not api_key:
         return {"status": "error", "error_message": "Missing OpenWeatherMap API key"}
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={location}&units=metric&appid={api_key}"
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={destination}&units=metric&appid={api_key}"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
         return {
             "status": "success",
-            "location": location,
+            "destination": destination,
             "temperature": data["main"]["temp"],
             "humidity": data["main"]["humidity"],
-            "weather_condition": data["weather"][0]["description"],
+            "condition": data["weather"][0]["description"],
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         return {"status": "error", "error_message": f"Failed to fetch weather: {str(e)}"}
 
-# Stock Prediction Tool
-def predict_stock_price(ticker: str, weather_data: dict) -> dict:
+# Activity Tool (Mock implementation, replace with real data source if needed)
+def suggest_activities(destination: str, weather: dict, interests: list[str], budget: float) -> list[dict]:
     try:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=30)
-        stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if stock_data.empty:
-            return {"status": "error", "error_message": f"No stock data for {ticker}"}
-        features = pd.DataFrame({
-            "close_price": stock_data["Close"],
-            "temperature": weather_data.get("temperature", 0),
-            "humidity": weather_data.get("humidity", 0)
-        })
-        model = LinearRegression()
-        X = features[["temperature", "humidity"]].iloc[:-1]
-        y = features["close_price"].shift(-1).iloc[:-1]
-        model.fit(X, y)
-        latest_features = features[["temperature", "humidity"]].iloc[-1:]
-        predicted_price = model.predict(latest_features)[0]
-        return {
-            "status": "success",
-            "ticker": ticker,
-            "predicted_price": round(predicted_price, 2),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+        # Mock activity suggestions based on interests and weather
+        activities = []
+        if "museums" in interests and budget >= 20:
+            activities.append({"name": f"Visit {destination} Museum", "cost": 20, "suitable_weather": "any"})
+        if "hiking" in interests and weather.get("condition", "").lower() not in ["rain", "storm"] and budget >= 10:
+            activities.append({"name": f"Hiking in {destination} Park", "cost": 10, "suitable_weather": "clear"})
+        if "food" in interests and budget >= 30:
+            activities.append({"name": f"Local Cuisine Tour in {destination}", "cost": 30, "suitable_weather": "any"})
+        return activities if activities else [{"name": "Relax at hotel", "cost": 0, "suitable_weather": "any"}]
     except Exception as e:
-        return {"status": "error", "error_message": f"Prediction failed: {str(e)}"}
+        return [{"status": "error", "error_message": f"Failed to suggest activities: {str(e)}"}]
 
 # Global MCP Client
 mcp_client = None
@@ -101,23 +98,23 @@ async def initialize_agents():
     weather_agent = LlmAgent(
         name="weather_agent",
         model="gemini-2.5-pro",
-        description="Fetches real-time weather data for a given location.",
-        instruction="Fetch weather data for the specified location using the provided tool.",
+        description="Fetches weather data for the travel destination.",
+        instruction="Fetch weather data for the specified destination using the provided tool.",
         tools=[weather_tool]
     )
 
-    stock_prediction_agent = LlmAgent(
-        name="stock_prediction_agent",
+    activity_agent = LlmAgent(
+        name="activity_agent",
         model="gemini-2.5-pro",
-        description="Predicts stock prices using historical data and weather data.",
-        instruction="Use weather data and historical stock data to predict the stock price for the given ticker.",
-        tools=[FunctionTool(predict_stock_price)]
+        description="Suggests activities based on weather, interests, and budget.",
+        instruction="Suggest activities for the destination based on weather, user interests, and budget.",
+        tools=[FunctionTool(suggest_activities)]
     )
 
     orchestrator_agent = SequentialAgent(
         name="orchestrator_agent",
-        sub_agents=[weather_agent, stock_prediction_agent],
-        description="Coordinates weather data retrieval and stock price prediction."
+        sub_agents=[weather_agent, activity_agent],
+        description="Coordinates weather data and activity suggestions for a travel itinerary."
     )
     
     return orchestrator_agent
@@ -135,11 +132,9 @@ async def shutdown_event():
         await mcp_client.stop()
         logger.info("MCP client stopped")
 
-# WebSocket Endpoint with Dynamic Session
-@app.websocket("/ws/predict")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    logger.info("WebSocket connection established")
+# HTTP Endpoint
+@app.post("/api/plan-itinerary", response_model=ItineraryResponse)
+async def plan_itinerary(request: TravelRequest):
     try:
         user_id = f"user_{uuid.uuid4()}"
         session_id = f"session_{uuid.uuid4()}"
@@ -155,46 +150,31 @@ async def websocket_endpoint(websocket: WebSocket):
             app_name=APP_NAME,
             session_service=session_service
         )
-        while True:
-            try:
-                data = await websocket.receive_json()
-                ticker = data.get("ticker", "ADM")
-                location = data.get("location", "Chicago")
-                query = f"Predict the stock price for {ticker} using weather data from {location}."
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part(text=query)]
-                )
-                result = None
-                for event in runner.run(
-                    user_id=user_id,
-                    session_id=session_id,
-                    new_message=content
-                ):
-                    if event.is_final_response():
-                        result = event.content.parts[0].text
-                        break
-                weather_data = get_weather(location)  # Fallback to direct call
-                prediction = predict_stock_price(ticker, weather_data)
-                response = {
-                    "weather": weather_data,
-                    "prediction": prediction,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                await websocket.send_json(response)
-                await asyncio.sleep(60)  # Update every minute
-            except WebSocketDisconnect:
-                logger.info("WebSocket disconnected")
+        query = f"Plan a travel itinerary for {request.destination} from {request.start_date} to {request.end_date} with interests {', '.join(request.interests)} and budget ${request.budget}."
+        content = types.Content(
+            role="user",
+            parts=[types.Part(text=query)]
+        )
+        result = None
+        for event in runner.run(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=content
+        ):
+            if event.is_final_response():
+                result = event.content.parts[0].text
                 break
-            except Exception as e:
-                logger.error(f"WebSocket error: {str(e)}")
-                await websocket.send_json({"status": "error", "error_message": str(e)})
+        weather_data = get_weather(request.destination)  # Fallback direct call
+        activities = suggest_activities(request.destination, weather_data, request.interests, request.budget)
+        return ItineraryResponse(
+            destination=request.destination,
+            weather=weather_data,
+            activities=activities,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
     except Exception as e:
-        logger.error(f"WebSocket connection error: {str(e)}")
-        await websocket.send_json({"status": "error", "error_message": str(e)})
-    finally:
-        await websocket.close()
-        logger.info("WebSocket connection closed")
+        logger.error(f"Error planning itinerary: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

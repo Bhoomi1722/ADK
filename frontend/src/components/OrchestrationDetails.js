@@ -5,17 +5,17 @@ const OrchestrationDetails = () => {
   const steps = [
     {
       name: 'Weather Agent',
-      description: 'Fetches real-time weather data for the specified location using OpenWeatherMap API via MCP.',
+      description: 'Fetches weather forecast for the destination using OpenWeatherMap API via MCP.',
       status: 'Completed',
     },
     {
-      name: 'Stock Prediction Agent',
-      description: 'Uses weather data and historical stock prices to predict the stock price using a Linear Regression model.',
+      name: 'Activity Agent',
+      description: 'Suggests activities based on weather, user interests, and budget constraints.',
       status: 'Completed',
     },
     {
       name: 'Orchestrator Agent',
-      description: 'Coordinates the workflow between Weather Agent and Stock Prediction Agent to deliver the final prediction.',
+      description: 'Coordinates weather and activity agents to create a personalized travel itinerary.',
       status: 'Completed',
     },
   ];

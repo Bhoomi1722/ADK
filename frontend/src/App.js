@@ -1,76 +1,40 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import OrchestrationDetails from './components/OrchestrationDetails';
 import LoadingSpinner from './components/LoadingSpinner';
 import './App.css';
 
 const App = () => {
-  const [ticker, setTicker] = useState('ADM');
-  const [location, setLocation] = useState('Chicago');
-  const [weather, setWeather] = useState(null);
-  const [prediction, setPrediction] = useState(null);
+  const [destination, setDestination] = useState('Paris');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [budget, setBudget] = useState(1000);
+  const [interests, setInterests] = useState(['museums', 'food']);
+  const [itinerary, setItinerary] = useState(null);
   const [error, setError] = useState(null);
-  const [ws, setWs] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
 
-  const connectWebSocket = () => {
-    const websocket = new WebSocket('ws://localhost:8000/ws/predict');
-    setWs(websocket);
-
-    websocket.onopen = () => {
-      console.log('WebSocket connected');
-      websocket.send(JSON.stringify({ ticker, location }));
-      setIsLoading(true);
-      setError(null);
-    };
-
-    websocket.onmessage = (event) => {
+  const handleSubmit = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/plan-itinerary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ destination, start_date: startDate, end_date: endDate, budget, interests })
+      });
+      if (!response.ok) throw new Error('Failed to fetch itinerary');
+      const data = await response.json();
+      setItinerary(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
       setIsLoading(false);
-      try {
-        const data = JSON.parse(event.data);
-        if (data.weather) setWeather(data.weather);
-        if (data.prediction) setPrediction(data.prediction);
-        if (data.status === 'error') setError(data.error_message);
-      } catch (e) {
-        setError('Failed to parse server response');
-      }
-    };
-
-    websocket.onclose = () => {
-      console.log('WebSocket closed, attempting to reconnect...');
-      setError('WebSocket connection closed. Reconnecting...');
-      setTimeout(connectWebSocket, 5000); // Reconnect after 5 seconds
-    };
-
-    websocket.onerror = (event) => {
-      console.error('WebSocket error:', event);
-      setError('WebSocket connection failed');
-      websocket.close();
-    };
-  };
-
-  useEffect(() => {
-    connectWebSocket();
-    return () => {
-      if (ws) ws.close();
-    };
-  }, []);
-
-  const handleSubmit = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      setIsLoading(true);
-      setError(null);
-      ws.send(JSON.stringify({ ticker, location }));
-    } else {
-      setError('WebSocket not connected. Reconnecting...');
-      connectWebSocket();
     }
   };
 
-  const toggleTheme = () => {
-    setIsDarkMode(!isDarkMode);
-  };
+  const toggleTheme = () => setIsDarkMode(!isDarkMode);
 
   return (
     <div className={`container mx-auto p-6 ${isDarkMode ? 'dark' : ''}`}>
@@ -80,7 +44,7 @@ const App = () => {
         transition={{ duration: 0.5 }}
         className="flex justify-between items-center mb-6"
       >
-        <h1 className="text-4xl font-bold text-white dark:text-gray-200">Stock Price Predictor</h1>
+        <h1 className="text-4xl font-bold text-white dark:text-gray-200">Travel Itinerary Planner</h1>
         <button
           onClick={toggleTheme}
           className="p-2 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-600 transition"
@@ -97,23 +61,51 @@ const App = () => {
       >
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Ticker Symbol</label>
+            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Destination</label>
             <input
               type="text"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
               className="mt-1 p-3 border border-gray-300 dark:border-gray-600 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500"
-              placeholder="e.g., ADM"
+              placeholder="e.g., Paris"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Location</label>
+            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Start Date</label>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="mt-1 p-3 border border-gray-300 dark:border-gray-600 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">End Date</label>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="mt-1 p-3 border border-gray-300 dark:border-gray-600 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Budget ($)</label>
+            <input
+              type="number"
+              value={budget}
+              onChange={(e) => setBudget(Number(e.target.value))}
+              className="mt-1 p-3 border border-gray-300 dark:border-gray-600 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500"
+              placeholder="e.g., 1000"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-200 dark:text-gray-300">Interests</label>
             <input
               type="text"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              value={interests.join(', ')}
+              onChange={(e) => setInterests(e.target.value.split(',').map(i => i.trim()))}
               className="mt-1 p-3 border border-gray-300 dark:border-gray-600 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500"
-              placeholder="e.g., Chicago"
+              placeholder="e.g., museums, food, hiking"
             />
           </div>
         </div>
@@ -123,7 +115,7 @@ const App = () => {
           onClick={handleSubmit}
           className="mt-4 bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition w-full md:w-auto"
         >
-          Get Prediction
+          Plan Itinerary
         </motion.button>
       </motion.div>
 
@@ -142,7 +134,7 @@ const App = () => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnimatePresence>
-          {weather && (
+          {itinerary?.weather && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -150,15 +142,15 @@ const App = () => {
               transition={{ duration: 0.5 }}
               className="bg-white/10 dark:bg-gray-800/50 backdrop-blur-lg p-6 rounded-lg shadow-lg"
             >
-              <h2 className="text-2xl font-semibold text-white dark:text-gray-200 mb-4">Weather Data</h2>
-              <p className="text-gray-200 dark:text-gray-300">Location: {weather.location}</p>
-              <p className="text-gray-200 dark:text-gray-300">Temperature: {weather.temperature}°C</p>
-              <p className="text-gray-200 dark:text-gray-300">Humidity: {weather.humidity}%</p>
-              <p className="text-gray-200 dark:text-gray-300">Condition: {weather.weather_condition}</p>
-              <p className="text-gray-200 dark:text-gray-300">Timestamp: {weather.timestamp}</p>
+              <h2 className="text-2xl font-semibold text-white dark:text-gray-200 mb-4">Weather Forecast</h2>
+              <p className="text-gray-200 dark:text-gray-300">Destination: {itinerary.weather.destination}</p>
+              <p className="text-gray-200 dark:text-gray-300">Temperature: {itinerary.weather.temperature}°C</p>
+              <p className="text-gray-200 dark:text-gray-300">Humidity: {itinerary.weather.humidity}%</p>
+              <p className="text-gray-200 dark:text-gray-300">Condition: {itinerary.weather.condition}</p>
+              <p className="text-gray-200 dark:text-gray-300">Timestamp: {itinerary.weather.timestamp}</p>
             </motion.div>
           )}
-          {prediction && (
+          {itinerary?.activities && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -166,10 +158,14 @@ const App = () => {
               transition={{ duration: 0.5, delay: 0.2 }}
               className="bg-white/10 dark:bg-gray-800/50 backdrop-blur-lg p-6 rounded-lg shadow-lg"
             >
-              <h2 className="text-2xl font-semibold text-white dark:text-gray-200 mb-4">Stock Prediction</h2>
-              <p className="text-gray-200 dark:text-gray-300">Ticker: {prediction.ticker}</p>
-              <p className="text-gray-200 dark:text-gray-300">Predicted Price: ${prediction.predicted_price}</p>
-              <p className="text-gray-200 dark:text-gray-300">Timestamp: {prediction.timestamp}</p>
+              <h2 className="text-2xl font-semibold text-white dark:text-gray-200 mb-4">Recommended Activities</h2>
+              {itinerary.activities.map((activity, index) => (
+                <div key={index} className="mb-2">
+                  <p className="text-gray-200 dark:text-gray-300">Activity: {activity.name}</p>
+                  <p className="text-gray-200 dark:text-gray-300">Cost: ${activity.cost}</p>
+                  <p className="text-gray-200 dark:text-gray-300">Weather Suitability: {activity.suitable_weather}</p>
+                </div>
+              ))}
             </motion.div>
           )}
           {error && (
