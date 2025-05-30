@@ -7,14 +7,13 @@ from sklearn.linear_model import LinearRegression
 from fastapi import FastAPI, WebSocket
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from mcp.client.stdio import StdioServerParameters
 import requests
 from datetime import datetime, timedelta
 import json
+from mcp.client.stdio import StdioClient
 
 app = FastAPI()
 
@@ -74,43 +73,57 @@ def predict_stock_price(ticker: str, weather_data: dict) -> dict:
     except Exception as e:
         return {"status": "error", "error_message": f"Prediction failed: {str(e)}"}
 
+# MCP Client Setup
+async def create_mcp_tool():
+    api_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api.py")
+    client = StdioClient(
+        command="python",
+        args=[api_script_path, "--mode", "mcp"]
+    )
+    await client.start()
+    return FunctionTool(client.call)
+
 # Agents
-weather_agent = LlmAgent(
-    name="weather_agent",
-    model="gemini-2.5-pro",
-    description="Fetches real-time weather data for a given location.",
-    instruction="Fetch weather data for the specified location using the provided tool.",
-    tools=[FunctionTool(get_weather)]
-)
+async def initialize_agents():
+    weather_tool = await create_mcp_tool()
+    weather_agent = LlmAgent(
+        name="weather_agent",
+        model="gemini-2.5-pro",
+        description="Fetches real-time weather data for a given location.",
+        instruction="Fetch weather data for the specified location using the provided tool.",
+        tools=[weather_tool]
+    )
 
-stock_prediction_agent = LlmAgent(
-    name="stock_prediction_agent",
-    model="gemini-2.5-pro",
-    description="Predicts stock prices using historical data and weather data.",
-    instruction="Use weather data and historical stock data to predict the stock price for the given ticker.",
-    tools=[FunctionTool(predict_stock_price)]
-)
+    stock_prediction_agent = LlmAgent(
+        name="stock_prediction_agent",
+        model="gemini-2.5-pro",
+        description="Predicts stock prices using historical data and weather data.",
+        instruction="Use weather data and historical stock data to predict the stock price for the given ticker.",
+        tools=[FunctionTool(predict_stock_price)]
+    )
 
-orchestrator_agent = SequentialAgent(
-    name="orchestrator_agent",
-    sub_agents=[weather_agent, stock_prediction_agent],
-    description="Coordinates weather data retrieval and stock price prediction.",
-    instruction="First, fetch weather data for the specified location. Then, use the weather data to predict the stock price for the given ticker."
-)
+    orchestrator_agent = SequentialAgent(
+        name="orchestrator_agent",
+        sub_agents=[weather_agent, stock_prediction_agent],
+        description="Coordinates weather data retrieval and stock price prediction."
+    )
+    
+    return orchestrator_agent
 
 # WebSocket Endpoint with Dynamic Session
 @app.websocket("/ws/predict")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
-        user_id = f"user_{uuid.uuid4()}"  # Dynamic user ID
-        session_id = f"session_{uuid.uuid4()}"  # Dynamic session ID
+        user_id = f"user_{uuid.uuid4()}"
+        session_id = f"session_{uuid.uuid4()}"
         session_service = InMemorySessionService()
         session = session_service.create_session(
             app_name=APP_NAME,
             user_id=user_id,
             session_id=session_id
         )
+        orchestrator_agent = await initialize_agents()
         runner = Runner(
             agent=orchestrator_agent,
             app_name=APP_NAME,
@@ -134,7 +147,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if event.is_final_response():
                     result = event.content.parts[0].text
                     break
-            weather_data = get_weather(location)
+            weather_data = get_weather(location)  # Fallback to direct call for reliability
             prediction = predict_stock_price(ticker, weather_data)
             response = {
                 "weather": weather_data,
@@ -146,23 +159,11 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         await websocket.send_json({"status": "error", "error_message": str(e)})
         await websocket.close()
-
-# MCP Server
-async def run_mcp_client():
-    api_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api.py")
-    tools, exit_stack = await MCPToolset.from_server(
-        connection_params=StdioServerParameters(
-            command="python",
-            args=[api_script_path, "--mode", "mcp"]
-        )
-    )
-    try:
-        tool_names = [tool.name for tool in tools]
-        print(f"Found {len(tool_names)} tools: {', '.join(tool_names)}")
     finally:
-        await exit_stack.aclose()
+        # Ensure MCP client is closed
+        if 'client' in locals():
+            await client.stop()
 
 if __name__ == "__main__":
     import uvicorn
-    asyncio.run(run_mcp_client())
     uvicorn.run(app, host="0.0.0.0", port=8000)
