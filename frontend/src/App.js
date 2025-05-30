@@ -14,37 +14,57 @@ const App = () => {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
 
-  useEffect(() => {
+  const connectWebSocket = () => {
     const websocket = new WebSocket('ws://localhost:8000/ws/predict');
     setWs(websocket);
 
     websocket.onopen = () => {
+      console.log('WebSocket connected');
       websocket.send(JSON.stringify({ ticker, location }));
       setIsLoading(true);
+      setError(null);
     };
 
     websocket.onmessage = (event) => {
       setIsLoading(false);
-      const data = JSON.parse(event.data);
-      if (data.weather) setWeather(data.weather);
-      if (data.prediction) setPrediction(data.prediction);
-      if (data.status === 'error') setError(data.error_message);
+      try {
+        const data = JSON.parse(event.data);
+        if (data.weather) setWeather(data.weather);
+        if (data.prediction) setPrediction(data.prediction);
+        if (data.status === 'error') setError(data.error_message);
+      } catch (e) {
+        setError('Failed to parse server response');
+      }
     };
 
     websocket.onclose = () => {
-      setError('WebSocket connection closed');
-      setIsLoading(false);
+      console.log('WebSocket closed, attempting to reconnect...');
+      setError('WebSocket connection closed. Reconnecting...');
+      setTimeout(connectWebSocket, 5000); // Reconnect after 5 seconds
     };
 
-    return () => {
+    websocket.onerror = (event) => {
+      console.error('WebSocket error:', event);
+      setError('WebSocket connection failed');
       websocket.close();
+    };
+  };
+
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (ws) ws.close();
     };
   }, []);
 
   const handleSubmit = () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       setIsLoading(true);
+      setError(null);
       ws.send(JSON.stringify({ ticker, location }));
+    } else {
+      setError('WebSocket not connected. Reconnecting...');
+      connectWebSocket();
     }
   };
 

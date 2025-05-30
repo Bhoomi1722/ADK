@@ -14,6 +14,11 @@ import requests
 from datetime import datetime, timedelta
 import json
 from mcp.client.stdio import StdioClient
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -24,7 +29,7 @@ os.environ["GCP_PROJECT"] = "your-gcp-project"
 os.environ["GCP_LOCATION"] = "us-central1"
 APP_NAME = os.getenv("APP_NAME", "stock_weather_app")
 
-# Weather Tool
+# Weather Tool (Direct Fallback)
 def get_weather(location: str) -> dict:
     api_key = os.getenv("OPENWEATHER_API_KEY")
     if not api_key:
@@ -73,19 +78,26 @@ def predict_stock_price(ticker: str, weather_data: dict) -> dict:
     except Exception as e:
         return {"status": "error", "error_message": f"Prediction failed: {str(e)}"}
 
-# MCP Client Setup
-async def create_mcp_tool():
-    api_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api.py")
-    client = StdioClient(
-        command="python",
-        args=[api_script_path, "--mode", "mcp"]
-    )
-    await client.start()
-    return FunctionTool(client.call)
+# Global MCP Client
+mcp_client = None
+
+async def start_mcp_client():
+    global mcp_client
+    try:
+        api_script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api.py")
+        mcp_client = StdioClient(
+            command="python",
+            args=[api_script_path, "--mode", "mcp"]
+        )
+        await mcp_client.start()
+        logger.info("MCP client started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start MCP client: {str(e)}")
+        mcp_client = None
 
 # Agents
 async def initialize_agents():
-    weather_tool = await create_mcp_tool()
+    weather_tool = FunctionTool(get_weather) if mcp_client is None else FunctionTool(mcp_client.call)
     weather_agent = LlmAgent(
         name="weather_agent",
         model="gemini-2.5-pro",
@@ -110,10 +122,24 @@ async def initialize_agents():
     
     return orchestrator_agent
 
+# Startup Event
+@app.on_event("startup")
+async def startup_event():
+    await start_mcp_client()
+
+# Shutdown Event
+@app.on_event("shutdown")
+async def shutdown_event():
+    global mcp_client
+    if mcp_client:
+        await mcp_client.stop()
+        logger.info("MCP client stopped")
+
 # WebSocket Endpoint with Dynamic Session
 @app.websocket("/ws/predict")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    logger.info("WebSocket connection established")
     try:
         user_id = f"user_{uuid.uuid4()}"
         session_id = f"session_{uuid.uuid4()}"
@@ -130,39 +156,45 @@ async def websocket_endpoint(websocket: WebSocket):
             session_service=session_service
         )
         while True:
-            data = await websocket.receive_json()
-            ticker = data.get("ticker", "ADM")
-            location = data.get("location", "Chicago")
-            query = f"Predict the stock price for {ticker} using weather data from {location}."
-            content = types.Content(
-                role="user",
-                parts=[types.Part(text=query)]
-            )
-            result = None
-            for event in runner.run(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=content
-            ):
-                if event.is_final_response():
-                    result = event.content.parts[0].text
-                    break
-            weather_data = get_weather(location)  # Fallback to direct call for reliability
-            prediction = predict_stock_price(ticker, weather_data)
-            response = {
-                "weather": weather_data,
-                "prediction": prediction,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            await websocket.send_json(response)
-            await asyncio.sleep(60)  # Update every minute
+            try:
+                data = await websocket.receive_json()
+                ticker = data.get("ticker", "ADM")
+                location = data.get("location", "Chicago")
+                query = f"Predict the stock price for {ticker} using weather data from {location}."
+                content = types.Content(
+                    role="user",
+                    parts=[types.Part(text=query)]
+                )
+                result = None
+                for event in runner.run(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=content
+                ):
+                    if event.is_final_response():
+                        result = event.content.parts[0].text
+                        break
+                weather_data = get_weather(location)  # Fallback to direct call
+                prediction = predict_stock_price(ticker, weather_data)
+                response = {
+                    "weather": weather_data,
+                    "prediction": prediction,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                await websocket.send_json(response)
+                await asyncio.sleep(60)  # Update every minute
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected")
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error: {str(e)}")
+                await websocket.send_json({"status": "error", "error_message": str(e)})
     except Exception as e:
+        logger.error(f"WebSocket connection error: {str(e)}")
         await websocket.send_json({"status": "error", "error_message": str(e)})
-        await websocket.close()
     finally:
-        # Ensure MCP client is closed
-        if 'client' in locals():
-            await client.stop()
+        await websocket.close()
+        logger.info("WebSocket connection closed")
 
 if __name__ == "__main__":
     import uvicorn
