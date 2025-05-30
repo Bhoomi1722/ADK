@@ -10,9 +10,10 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 import requests
 from datetime import datetime
-from mcp.client.stdio import stdio_client as StdioClient
+from mcp.client.stdio import StdioClient
 import logging
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,9 @@ def get_weather(destination: str) -> dict:
     except Exception as e:
         return {"status": "error", "error_message": f"Failed to fetch weather: {str(e)}"}
 
-# Activity Tool (Mock implementation, replace with real data source if needed)
+# Activity Tool (Mock implementation)
 def suggest_activities(destination: str, weather: dict, interests: list[str], budget: float) -> list[dict]:
     try:
-        # Mock activity suggestions based on interests and weather
         activities = []
         if "museums" in interests and budget >= 20:
             activities.append({"name": f"Visit {destination} Museum", "cost": 20, "suitable_weather": "any"})
@@ -136,36 +136,55 @@ async def shutdown_event():
 @app.post("/api/plan-itinerary", response_model=ItineraryResponse)
 async def plan_itinerary(request: TravelRequest):
     try:
+        # Initialize session service
+        session_service = InMemorySessionService()
         user_id = f"user_{uuid.uuid4()}"
         session_id = f"session_{uuid.uuid4()}"
-        session_service = InMemorySessionService()
+        
+        # Create session and verify
         session = session_service.create_session(
             app_name=APP_NAME,
             user_id=user_id,
             session_id=session_id
         )
+        logger.info(f"Created session: user_id={user_id}, session_id={session_id}")
+
+        # Initialize agents
         orchestrator_agent = await initialize_agents()
+        
+        # Initialize runner
         runner = Runner(
             agent=orchestrator_agent,
             app_name=APP_NAME,
             session_service=session_service
         )
+
+        # Prepare query
         query = f"Plan a travel itinerary for {request.destination} from {request.start_date} to {request.end_date} with interests {', '.join(request.interests)} and budget ${request.budget}."
         content = types.Content(
             role="user",
             parts=[types.Part(text=query)]
         )
+
+        # Run agent with session validation
         result = None
-        for event in runner.run(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=content
-        ):
-            if event.is_final_response():
-                result = event.content.parts[0].text
-                break
-        weather_data = get_weather(request.destination)  # Fallback direct call
+        try:
+            for event in runner.run(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=content
+            ):
+                if event.is_final_response():
+                    result = event.content.parts[0].text
+                    break
+        except ValueError as ve:
+            logger.error(f"Session error during runner.run: {str(ve)}")
+            raise HTTPException(status_code=500, detail="Session not found, please try again")
+
+        # Fallback direct calls for reliability
+        weather_data = get_weather(request.destination)
         activities = suggest_activities(request.destination, weather_data, request.interests, request.budget)
+
         return ItineraryResponse(
             destination=request.destination,
             weather=weather_data,
